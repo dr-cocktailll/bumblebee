@@ -1,10 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
-from airflow.sensors.s3_key_sensor import S3KeySensor
-from airflow.providers.postgres.operators.postgres import PostgresOperator
-from airflow.providers.amazon.aws.operators.s3 import S3ListOperator
 from airflow.utils.dates import days_ago
 import boto3
 import json

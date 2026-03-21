@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from scipy.spatial.transform import Rotation
 from typing import Dict, List, Tuple, Optional
@@ -250,7 +251,7 @@ class SpatialFeatureExtractor:
     @staticmethod
     def extract_height_features(lidar_points: np.ndarray) -> Dict[str, np.ndarray]:
         z_values = lidar_points[:, 2]
-        
+
         features = {
             'height_mean': np.array([np.mean(z_values)]),
             'height_std': np.array([np.std(z_values)]),
@@ -258,5 +259,31 @@ class SpatialFeatureExtractor:
             'height_max': np.array([np.max(z_values)]),
             'height_range': np.array([np.max(z_values) - np.min(z_values)])
         }
-        
+
         return features
+
+
+class PanopticLabelLoader:
+    """Loads per-point semantic segmentation labels from Panoptic nuScenes."""
+
+    def __init__(self, nusc: NuScenes):
+        self.nusc = nusc
+        self._has_lidarseg = self._check_lidarseg()
+
+    def _check_lidarseg(self) -> bool:
+        lidarseg_path = os.path.join(
+            self.nusc.dataroot, self.nusc.version, 'lidarseg.json'
+        )
+        return os.path.exists(lidarseg_path)
+
+    def load_labels(self, lidar_token: str) -> Optional[np.ndarray]:
+        if not self._has_lidarseg:
+            return None
+        try:
+            lidarseg_record = self.nusc.get('lidarseg', lidar_token)
+            labels_path = os.path.join(
+                self.nusc.dataroot, lidarseg_record['filename']
+            )
+            return np.fromfile(labels_path, dtype=np.uint8)
+        except Exception:
+            return None

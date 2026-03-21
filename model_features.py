@@ -8,6 +8,26 @@ import json
 
 from config import CONFIG
 
+NUSCENES_CATEGORY_REMAP = {
+    'vehicle.car': 'car',
+    'vehicle.truck': 'truck',
+    'vehicle.bus.bendy': 'bus',
+    'vehicle.bus.rigid': 'bus',
+    'vehicle.trailer': 'trailer',
+    'vehicle.construction': 'construction_vehicle',
+    'human.pedestrian.adult': 'pedestrian',
+    'human.pedestrian.child': 'pedestrian',
+    'human.pedestrian.construction_worker': 'pedestrian',
+    'human.pedestrian.police_officer': 'pedestrian',
+    'vehicle.motorcycle': 'motorcycle',
+    'vehicle.bicycle': 'bicycle',
+    'movable_object.trafficcone': 'traffic_cone',
+    'movable_object.barrier': 'barrier',
+}
+
+CATEGORY_INDEX = {name: idx for idx, name in enumerate(CONFIG.classes)}
+
+
 class ModelFeatureGenerator:
     def __init__(self):
         self.spark = SparkSession.builder \
@@ -93,35 +113,33 @@ class ModelFeatureGenerator:
         @udf(returnType=ArrayType(DoubleType()))
         def create_temporal_context(velocity_features, spatial_features_map):
             temporal_features = []
-            
-            if velocity_features and len(velocity_features) > 0:
-                velocities = np.array(velocity_features)
-                
-                avg_velocity = np.mean(velocities, axis=0) if len(velocities.shape) > 1 else velocities
-                max_velocity = np.max(np.linalg.norm(velocities, axis=1)) if len(velocities.shape) > 1 else np.linalg.norm(velocities)
-                
+
+            if velocity_features and len(velocity_features) >= 3:
+                velocities = np.array(velocity_features).reshape(-1, 3)
+                avg_velocity = np.mean(velocities, axis=0)
+                max_velocity = float(np.max(np.linalg.norm(velocities, axis=1)))
                 temporal_features.extend(avg_velocity.tolist())
                 temporal_features.append(max_velocity)
             else:
                 temporal_features.extend([0.0, 0.0, 0.0, 0.0])
-            
+
             if spatial_features_map:
                 if 'height_mean' in spatial_features_map:
                     temporal_features.extend(spatial_features_map['height_mean'])
                 else:
                     temporal_features.append(0.0)
-                
+
                 if 'height_std' in spatial_features_map:
                     temporal_features.extend(spatial_features_map['height_std'])
                 else:
                     temporal_features.append(0.0)
             else:
                 temporal_features.extend([0.0, 0.0])
-            
+
             return temporal_features
-        
-        return df.withColumn("temporal_features", 
-                           create_temporal_context(col("velocity_features"), 
+
+        return df.withColumn("temporal_features",
+                           create_temporal_context(col("velocity_features"),
                                                  col("spatial_features")))
     
     def _create_detection_targets(self, df: DataFrame) -> DataFrame:
@@ -134,29 +152,50 @@ class ModelFeatureGenerator:
         def parse_annotations(annotations_json, velocity_features):
             if not annotations_json:
                 return []
-            
+
             try:
-                ann_tokens = json.loads(annotations_json)
+                annotations = json.loads(annotations_json)
                 targets = []
-                
-                velocities = np.array(velocity_features) if velocity_features else np.array([[0, 0, 0]])
-                
-                for i, ann_token in enumerate(ann_tokens[:len(velocities)]):
-                    velocity = velocities[i] if i < len(velocities) else [0.0, 0.0, 0.0]
-                    
-                    target = {
-                        "class_id": hash(ann_token) % len(CONFIG.classes),
-                        "bbox_3d": [0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.0],
+
+                if velocity_features and len(velocity_features) >= 3:
+                    velocities = np.array(velocity_features).reshape(-1, 3)
+                else:
+                    velocities = np.empty((0, 3))
+
+                for i, ann in enumerate(annotations):
+                    cat_name = ann['category_name']
+                    det_class = NUSCENES_CATEGORY_REMAP.get(cat_name)
+                    if det_class is None:
+                        continue
+
+                    class_id = CATEGORY_INDEX[det_class]
+
+                    tx, ty, tz = ann['translation']
+                    w, l, h = ann['size']
+
+                    # yaw from quaternion [w, x, y, z]
+                    qw, qx, qy, qz = ann['rotation']
+                    yaw = float(np.arctan2(
+                        2.0 * (qw * qz + qx * qy),
+                        1.0 - 2.0 * (qy**2 + qz**2)
+                    ))
+
+                    bbox_3d = [tx, ty, tz, w, l, h, yaw]
+
+                    vel = velocities[i].tolist() if i < len(velocities) else [0.0, 0.0, 0.0]
+
+                    targets.append({
+                        "class_id": class_id,
+                        "bbox_3d": bbox_3d,
                         "confidence": 1.0,
-                        "velocity": velocity.tolist() if hasattr(velocity, 'tolist') else velocity
-                    }
-                    targets.append(target)
-                
+                        "velocity": vel
+                    })
+
                 return targets
-            except:
+            except Exception:
                 return []
-        
-        return df.withColumn("detection_targets", 
+
+        return df.withColumn("detection_targets",
                            parse_annotations(col("annotations"), col("velocity_features")))
     
     def _normalize_features(self, df: DataFrame) -> DataFrame:
